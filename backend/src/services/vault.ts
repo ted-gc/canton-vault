@@ -102,11 +102,24 @@ const demoVaults: VaultSummary[] = [
   },
 ];
 
-// In-memory holdings for demo mode
-const demoHoldings: Record<string, Record<string, { shares: number; cid: string }>> = {
+// In-memory share holdings for demo mode
+const demoShareHoldings: Record<string, Record<string, { shares: number; cid: string }>> = {
   "vault-1": {},
   "vault-2": {},
 };
+
+// In-memory underlying holdings for demo mode (party -> instrument -> holdings[])
+const demoUnderlyingHoldings: Record<string, { contractId: string; instrument: string; amount: number; locked: boolean }[]> = {};
+
+// Initialize demo underlying for a party
+function initDemoUnderlying(party: string): void {
+  if (!demoUnderlyingHoldings[party]) {
+    demoUnderlyingHoldings[party] = [
+      { contractId: `demo-usdc-${party}-1`, instrument: "USDC", amount: 10000, locked: false },
+      { contractId: `demo-eth-${party}-1`, instrument: "ETH", amount: 5, locked: false },
+    ];
+  }
+}
 
 // ===== Service =====
 
@@ -177,7 +190,7 @@ export class VaultService {
 
   async getHoldings(vaultId: string, party: string): Promise<VaultHolding> {
     if (!(await this.checkLedger())) {
-      const h = demoHoldings[vaultId]?.[party];
+      const h = demoShareHoldings[vaultId]?.[party];
       const vault = demoVaults.find((v) => v.id === vaultId);
       const value = h ? h.shares * (vault?.sharePrice ?? 1) : 0;
       return {
@@ -221,10 +234,12 @@ export class VaultService {
     locked: boolean;
   }[]> {
     if (!(await this.checkLedger())) {
-      return [
-        { contractId: "demo-usdc-1", instrument: "USDC", amount: 10000, locked: false },
-        { contractId: "demo-eth-1", instrument: "ETH", amount: 5, locked: false },
-      ];
+      // Demo mode - return dynamic holdings
+      initDemoUnderlying(party);
+      const holdings = demoUnderlyingHoldings[party] ?? [];
+      return holdings
+        .filter((h) => h.amount > 0)
+        .filter((h) => !instrumentId || h.instrument === instrumentId);
     }
 
     const contracts = await this.ledger.queryContracts<UnderlyingHoldingPayload>(
@@ -258,14 +273,27 @@ export class VaultService {
         : (request.amount * vault.totalShares) / vault.totalAssets;
 
     if (!(await this.checkLedger())) {
-      // Demo mode
-      demoHoldings[vaultId] = demoHoldings[vaultId] ?? {};
-      const existing = demoHoldings[vaultId][request.party]?.shares ?? 0;
-      demoHoldings[vaultId][request.party] = {
+      // Demo mode - deduct from underlying and credit shares
+      initDemoUnderlying(request.party);
+      
+      // Find and deduct from underlying holding
+      const underlying = demoUnderlyingHoldings[request.party]?.find(
+        (h) => h.instrument === vault.underlyingAsset && !h.locked && h.amount >= request.amount
+      );
+      if (!underlying) {
+        throw new Error(`Insufficient ${vault.underlyingAsset} balance`);
+      }
+      underlying.amount -= request.amount;
+      
+      // Credit vault shares
+      demoShareHoldings[vaultId] = demoShareHoldings[vaultId] ?? {};
+      const existing = demoShareHoldings[vaultId][request.party]?.shares ?? 0;
+      demoShareHoldings[vaultId][request.party] = {
         shares: existing + shares,
-        cid: `demo-holding-${Date.now()}`,
+        cid: `demo-share-${Date.now()}`,
       };
 
+      // Update vault totals
       const v = demoVaults.find((v) => v.id === vaultId);
       if (v) {
         v.totalAssets += request.amount;
@@ -314,17 +342,34 @@ export class VaultService {
         : (request.shares * vault.totalAssets) / vault.totalShares;
 
     if (!(await this.checkLedger())) {
-      // Demo mode
-      const h = demoHoldings[vaultId]?.[request.party];
+      // Demo mode - deduct shares and credit underlying
+      const h = demoShareHoldings[vaultId]?.[request.party];
       if (!h || h.shares < request.shares) {
         throw new Error("Insufficient shares");
       }
 
       h.shares -= request.shares;
       if (h.shares <= 0) {
-        delete demoHoldings[vaultId][request.party];
+        delete demoShareHoldings[vaultId][request.party];
       }
 
+      // Credit underlying back to user
+      initDemoUnderlying(request.party);
+      const underlying = demoUnderlyingHoldings[request.party]?.find(
+        (u) => u.instrument === vault.underlyingAsset
+      );
+      if (underlying) {
+        underlying.amount += assets;
+      } else {
+        demoUnderlyingHoldings[request.party].push({
+          contractId: `demo-${vault.underlyingAsset.toLowerCase()}-${Date.now()}`,
+          instrument: vault.underlyingAsset,
+          amount: assets,
+          locked: false,
+        });
+      }
+
+      // Update vault totals
       const v = demoVaults.find((v) => v.id === vaultId);
       if (v) {
         v.totalAssets -= assets;

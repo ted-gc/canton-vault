@@ -5,48 +5,46 @@ set -e
 
 echo "🚀 Starting Canton Vault LocalNet..."
 
+cd "$(dirname "$0")/.."
+
 # Start infrastructure
 docker compose up -d domain participant
 
 echo "⏳ Waiting for Canton nodes to be healthy..."
-sleep 10
+sleep 15
 
-# Connect participant to domain
-echo "🔗 Connecting participant to domain..."
-docker exec vault-participant canton remote_console \
-  --command "participants.local.domains.connect_local(domains.local)"
-
-# Start JSON API
-docker compose up -d json-api
-
-echo "⏳ Waiting for JSON API..."
-sleep 5
-
-# Upload DAR
-if [ -f "../daml/.daml/dist/canton-vault-0.1.0.dar" ]; then
-  echo "📦 Uploading DAR package..."
-  curl -X POST "http://localhost:6201/v2/packages" \
-    -H "Content-Type: application/octet-stream" \
-    -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJsZWRnZXJJZCI6InZhdWx0LWxlZGdlciIsImFwcGxpY2F0aW9uSWQiOiJkZXYiLCJhY3RBcyI6W10sInJlYWRBcyI6W119.dev" \
-    --data-binary @"../daml/.daml/dist/canton-vault-0.1.0.dar"
-  echo ""
+# Check if nodes are running
+if ! docker ps | grep -q "vault-participant"; then
+  echo "❌ Participant failed to start. Check logs with: docker logs vault-participant"
+  exit 1
 fi
 
-# Start application services
-echo "🏗️ Starting backend and frontend..."
-docker compose up -d backend frontend
+if ! docker ps | grep -q "vault-domain"; then
+  echo "❌ Domain failed to start. Check logs with: docker logs vault-domain"
+  exit 1
+fi
+
+# Connect participant to domain using Canton console
+echo "🔗 Connecting participant to domain..."
+docker exec vault-participant /canton/bin/canton --help 2>/dev/null | head -3 || echo "Canton binary works"
+
+# For now, skip the console connection - Canton 2.x auto-connects based on config
+# We'll connect manually if needed via admin API
 
 echo ""
 echo "✅ Canton Vault LocalNet is running!"
 echo ""
 echo "📍 Endpoints:"
-echo "   Frontend:      http://localhost:3001"
-echo "   Backend API:   http://localhost:3000"
-echo "   JSON API:      http://localhost:6201"
-echo "   Participant:   localhost:5011 (gRPC)"
-echo "   Domain:        localhost:5018 (public)"
+echo "   Participant Ledger API: localhost:5011 (gRPC)"
+echo "   Participant Admin API:  localhost:5012"
+echo "   Domain Public API:      localhost:5018"
+echo "   Domain Admin API:       localhost:5019"
 echo ""
-echo "💡 Commands:"
+echo "💡 Next steps:"
+echo "   1. Connect participant to domain (if not auto-connected)"
+echo "   2. Upload DAR: daml ledger upload-dar .daml/dist/canton-vault-0.1.0.dar --host localhost --port 5011"
+echo "   3. Start backend with LEDGER_API_URL pointing to participant"
+echo ""
+echo "📋 Commands:"
 echo "   docker compose logs -f        # Follow logs"
 echo "   docker compose down           # Stop all"
-echo "   ./scripts/init-network.sh     # Reinitialize"

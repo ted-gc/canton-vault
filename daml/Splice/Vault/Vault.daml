@@ -111,14 +111,21 @@ template Vault
         let sharesToMint = calculateShares depositAmount state
         assertMsg "Would mint zero shares" (sharesToMint > 0.0)
 
-        -- Consume underlying holding
+        -- Transfer underlying to vault custody (CIP-0056 compliant)
         if underlying.amount == depositAmount
-          then archive underlyingHoldingCid
+          then do
+            exercise underlyingHoldingCid TransferUnderlying with
+              newOwner = id.admin
+              reason = "Deposit to vault: " <> id.name
+            return ()
           else do
-            (depositCid, _changeCid) <- exercise underlyingHoldingCid Split with
+            (depositCid, _changeCid) <- exercise underlyingHoldingCid SplitUnderlying with
               splitAmount = depositAmount
               reason = depositReason
-            archive depositCid
+            exercise depositCid TransferUnderlying with
+              newOwner = id.admin
+              reason = "Deposit to vault: " <> id.name
+            return ()
 
         -- Mint shares for receiver
         now <- getTime

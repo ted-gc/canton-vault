@@ -88,12 +88,15 @@ export class VaultService {
   }
 
   async getHoldings(vaultId: string, party: string): Promise<VaultHolding> {
+    const vault = await this.findVaultContract(vaultId);
+    const vaultName = vault.payload?.id?.name ?? vaultId;
+
     const holdings = await this.ledger.queryContracts<HoldingPayload>(SHARE_HOLDING_TEMPLATE, {
       owner: party,
     });
 
     const shares = holdings
-      .filter((holding) => holding.payload?.vault?.name === vaultId)
+      .filter((holding) => holding.payload?.vault?.name === vaultName)
       .reduce((sum, holding) => sum + toNumber(holding.payload?.amount), 0);
 
     return { party, shares };

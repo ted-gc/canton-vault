@@ -223,7 +223,7 @@ template Vault
             exercise burnCid Burn with reason = redeemReason
         
         -- Create underlying asset holding for receiver (CIP-0056 compliant)
-        _underlyingCid <- create UnderlyingAssetHolding with
+        underlyingCid <- create UnderlyingAssetHolding with
           instrument = config.underlyingAsset
           owner = receiver
           amount = assetsToReturn

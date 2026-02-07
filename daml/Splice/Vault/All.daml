@@ -1,0 +1,12 @@
+-- | Canton Vault - convenience module
+-- Import individual modules to avoid name collisions
+module Splice.Vault.All where
+
+-- Re-export only Types (no collisions)
+import Splice.Vault.Types
+
+-- For other modules, import them directly:
+-- import Splice.Vault.VaultShares
+-- import Splice.Vault.Vault
+-- import Splice.Vault.AsyncRequests
+-- import Splice.Vault.TransferFactory

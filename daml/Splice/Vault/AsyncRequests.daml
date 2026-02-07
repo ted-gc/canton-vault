@@ -1,0 +1,121 @@
+-- | Asynchronous deposit and redemption requests (EIP-7540)
+-- Simplified version for Daml 3.x compatibility
+module Splice.Vault.AsyncRequests where
+
+import DA.Optional
+import Splice.Vault.Types
+import Splice.Vault.VaultShares
+
+-- | Async deposit request (EIP-7540 requestDeposit)
+template DepositRequest
+  with
+    requestId : Text
+    vault : VaultId
+    reqController : Party            -- Who can manage/claim this request
+    owner : Party
+    assets : Decimal
+    status : RequestStatus
+    deadline : Time
+    claimableShares : Optional Decimal
+    createdAt : Time
+    meta : Metadata
+  where
+    signatory vault.admin, reqController
+    observer owner
+    
+    ensure assets > 0.0
+
+    choice MakeDepositClaimable : ContractId DepositRequest
+      with
+        sharesToIssue : Decimal
+        processReason : Text
+      controller vault.admin
+      do
+        assertMsg "Not pending" (status == Pending)
+        assertMsg "Shares must be positive" (sharesToIssue > 0.0)
+        now <- getTime
+        assertMsg "Request expired" (now <= deadline)
+        create this with
+          status = Claimable
+          claimableShares = Some sharesToIssue
+
+    choice ClaimDeposit : ContractId VaultShareHolding
+      with
+        claimReason : Text
+      controller reqController
+      do
+        assertMsg "Not claimable" (status == Claimable)
+        shares <- optional (abort "No claimable shares") pure claimableShares
+        now <- getTime
+        create VaultShareHolding with
+          vault = vault
+          owner = reqController
+          amount = shares
+          holdingLock = None
+          createdAt = now
+          meta = setMetaValue txKindKey "mint" $
+                 setMetaValue "depositRequestId" requestId $
+                 setMetaValue reasonKey claimReason []
+
+    choice CancelDepositRequest : ()
+      with
+        cancelReason : Text
+      controller reqController
+      do
+        now <- getTime
+        let canCancel = status == Pending || now > deadline
+        assertMsg "Cannot cancel" canCancel
+        return ()
+
+
+-- | Async redeem request (EIP-7540 requestRedeem)
+template RedeemRequest
+  with
+    requestId : Text
+    vault : VaultId
+    reqController : Party
+    owner : Party
+    shares : Decimal
+    status : RequestStatus
+    deadline : Time
+    claimableAssets : Optional Decimal
+    createdAt : Time
+    meta : Metadata
+  where
+    signatory vault.admin, reqController
+    observer owner
+    
+    ensure shares > 0.0
+
+    choice MakeRedeemClaimable : ContractId RedeemRequest
+      with
+        assetsToReturn : Decimal
+        processReason : Text
+      controller vault.admin
+      do
+        assertMsg "Not pending" (status == Pending)
+        assertMsg "Assets must be positive" (assetsToReturn > 0.0)
+        now <- getTime
+        assertMsg "Request expired" (now <= deadline)
+        create this with
+          status = Claimable
+          claimableAssets = Some assetsToReturn
+
+    choice ClaimRedeem : Decimal
+      with
+        claimReason : Text
+      controller reqController
+      do
+        assertMsg "Not claimable" (status == Claimable)
+        assets <- optional (abort "No claimable assets") pure claimableAssets
+        return assets
+
+    choice CancelRedeemRequest : ()
+      with
+        cancelReason : Text
+      controller reqController
+      do
+        now <- getTime
+        let canCancel = status == Pending || now > deadline
+        assertMsg "Cannot cancel" canCancel
+        return ()

@@ -1,0 +1,96 @@
+# Canton Network LocalNet for Vault Development
+# Based on CN Quickstart patterns
+version: '3.8'
+
+services:
+  # Canton Participant Node
+  participant:
+    image: digitalasset/canton-open-source:2.10.0
+    container_name: vault-participant
+    ports:
+      - "5011:5011"  # Ledger API
+      - "5012:5012"  # Admin API
+    volumes:
+      - ./config/participant.conf:/canton/config/participant.conf
+      - ./data/participant:/canton/data
+    command: daemon --config /canton/config/participant.conf
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr=localhost:5011"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Canton Domain (Synchronizer)
+  domain:
+    image: digitalasset/canton-open-source:2.10.0
+    container_name: vault-domain
+    ports:
+      - "5018:5018"  # Public API
+      - "5019:5019"  # Admin API
+    volumes:
+      - ./config/domain.conf:/canton/config/domain.conf
+      - ./data/domain:/canton/data
+    command: daemon --config /canton/config/domain.conf
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr=localhost:5019"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # JSON API (HTTP Ledger API)
+  json-api:
+    image: digitalasset/daml-sdk:3.3.0
+    container_name: vault-json-api
+    depends_on:
+      participant:
+        condition: service_healthy
+    ports:
+      - "6201:6201"
+    environment:
+      - DAML_LEDGER_HOST=participant
+      - DAML_LEDGER_PORT=5011
+      - DAML_HTTP_PORT=6201
+    command: ["daml", "json-api", "--ledger-host=participant", "--ledger-port=5011", "--http-port=6201", "--allow-insecure-tokens"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6201/livez"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Vault Backend
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: vault-backend
+    depends_on:
+      json-api:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      - LEDGER_API_URL=http://json-api:6201/v2
+      - LEDGER_SUBMIT=true
+      - PORT=3000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Vault Frontend
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    container_name: vault-frontend
+    depends_on:
+      - backend
+    ports:
+      - "3001:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:3000
+
+networks:
+  default:
+    name: canton-vault-network

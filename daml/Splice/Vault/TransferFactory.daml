@@ -1,0 +1,147 @@
+-- | CIP-0056 Transfer Factory for Vault Shares
+-- Simplified version for Daml 3.x compatibility
+module Splice.Vault.TransferFactory where
+
+import DA.Optional
+import DA.Time
+import DA.Foldable (forA_)
+import Splice.Vault.Types
+import Splice.Vault.VaultShares
+
+-- | Transfer instruction for vault shares
+template VaultShareTransferInstruction
+  with
+    vault : VaultId
+    sender : Party
+    receiver : Party
+    amount : Decimal
+    deadline : Time
+    status : InstructionStatus
+    createdAt : Time
+    meta : Metadata
+  where
+    signatory vault.admin, sender
+    observer receiver
+    
+    ensure amount > 0.0
+
+    choice Accept : ContractId VaultShareHolding
+      with
+        acceptReason : Text
+      controller receiver
+      do
+        now <- getTime
+        assertMsg "Instruction not pending" (status == InstructionPending)
+        assertMsg "Deadline passed" (now <= deadline)
+        
+        create VaultShareHolding with
+          vault = vault
+          owner = receiver
+          amount = amount
+          holdingLock = None
+          createdAt = now
+          meta = setMetaValue txKindKey "transfer" $
+                 setMetaValue senderKey (partyToText sender) $
+                 setMetaValue reasonKey acceptReason meta
+
+    choice Withdraw : ()
+      with
+        withdrawReason : Text
+      controller sender
+      do
+        assertMsg "Cannot withdraw completed instruction" (status == InstructionPending)
+        return ()
+
+    choice Abort : ()
+      with
+        abortReason : Text
+      controller vault.admin
+      do return ()
+
+
+-- | Factory for creating transfer instructions
+template VaultShareTransferFactory
+  with
+    vault : VaultId
+    defaultDeadlineSeconds : Int
+    meta : Metadata
+  where
+    signatory vault.admin
+
+    nonconsuming choice CreateTransfer : ContractId VaultShareTransferInstruction
+      with
+        sender : Party
+        receiver : Party
+        transferAmount : Decimal
+        customDeadline : Optional Time
+        transferMeta : Metadata
+      controller sender, vault.admin
+      do
+        assertMsg "Amount must be positive" (transferAmount > 0.0)
+        assertMsg "Cannot transfer to self" (sender /= receiver)
+        
+        now <- getTime
+        -- Default deadline: now + configured seconds
+        let defaultDeadline = addRelTime now (days 1)  -- 1 day default
+        let deadline = fromOptional defaultDeadline customDeadline
+        
+        create VaultShareTransferInstruction with
+          vault = vault
+          sender = sender
+          receiver = receiver
+          amount = transferAmount
+          deadline = deadline
+          status = InstructionPending
+          createdAt = now
+          meta = transferMeta ++ meta
+
+
+-- | Allocation for DVP settlement (CIP-0056)
+template VaultShareAllocation
+  with
+    vault : VaultId
+    owner : Party
+    amount : Decimal
+    settlementId : Text
+    settlementApp : Party
+    deadline : Time
+    createdAt : Time
+    meta : Metadata
+  where
+    signatory vault.admin, owner
+    observer settlementApp
+    
+    ensure amount > 0.0
+
+    choice ExecuteAllocation : ContractId VaultShareHolding
+      with
+        receiver : Party
+        executeReason : Text
+      controller settlementApp, vault.admin
+      do
+        now <- getTime
+        assertMsg "Allocation expired" (now <= deadline)
+        
+        create VaultShareHolding with
+          vault = vault
+          owner = receiver
+          amount = amount
+          holdingLock = None
+          createdAt = now
+          meta = setMetaValue txKindKey "transfer" $
+                 setMetaValue senderKey (partyToText owner) $
+                 setMetaValue "settlementId" settlementId $
+                 setMetaValue reasonKey executeReason meta
+
+    choice WithdrawAllocation : ()
+      with
+        withdrawReason : Text
+      controller owner
+      do return ()
+
+    choice ExpireAllocation : ()
+      controller vault.admin
+      do
+        now <- getTime
+        assertMsg "Not expired" (now > deadline)
+        return ()

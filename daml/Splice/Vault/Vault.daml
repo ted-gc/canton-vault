@@ -1,0 +1,288 @@
+-- | Main Vault template implementing ERC-4626 vault logic
+-- Supports both synchronous and asynchronous (EIP-7540) operations
+module Splice.Vault.Vault where
+
+import DA.Action (when, void)
+import DA.Foldable (forA_)
+import DA.Time
+import DA.List (head)
+import DA.Optional
+import Splice.Vault.Types
+import Splice.Vault.VaultShares
+
+-- | Main vault contract
+-- Manages deposits, withdrawals, and share accounting
+template Vault
+  with
+    id : VaultId                       -- Vault identifier
+    config : VaultConfig               -- Vault configuration
+    state : VaultState                 -- Current state (assets, shares)
+    meta : Metadata                    -- CIP-0056 metadata
+  where
+    signatory id.admin
+    
+    -- Vault key for lookups
+    
+    -- Ensure valid state
+    ensure state.totalAssets >= 0.0 && state.totalShares >= 0.0
+
+    -- ===== View Functions (ERC-4626) =====
+
+    -- | Get current total assets under management
+    nonconsuming choice GetTotalAssets : Decimal
+      controller id.admin
+      do return state.totalAssets
+
+    -- | Get total shares outstanding
+    nonconsuming choice GetTotalShares : Decimal
+      controller id.admin
+      do return state.totalShares
+
+    -- | Get current share price
+    nonconsuming choice GetSharePrice : Decimal
+      controller id.admin
+      do return $ sharePrice state
+
+    -- | Convert assets to shares (preview)
+    nonconsuming choice ConvertToShares : Decimal
+      with
+        assets : Decimal
+      controller id.admin
+      do return $ calculateShares assets state
+
+    -- | Convert shares to assets (preview)
+    nonconsuming choice ConvertToAssets : Decimal
+      with
+        shares : Decimal
+      controller id.admin
+      do return $ calculateAssets shares state
+
+    -- | Maximum deposit allowed for a given receiver
+    nonconsuming choice MaxDeposit : Decimal
+      with
+        receiver : Party
+      controller id.admin
+      do 
+        case config.depositLimit of
+          None -> return 999999999999.0  -- Effectively unlimited
+          Some limit -> return $ max 0.0 (limit - state.totalAssets)
+
+    -- | Maximum withdrawal for a given owner
+    nonconsuming choice MaxWithdraw : Decimal
+      with
+        owner : Party
+      controller id.admin
+      do 
+        -- Would need to query owner's actual holdings
+        -- For now, return total assets as upper bound
+        return state.totalAssets
+
+    -- ===== Synchronous Operations (ERC-4626) =====
+
+    -- | Deposit assets and receive shares
+    -- Mints shares proportional to deposit relative to total assets
+    choice Deposit : (ContractId Vault, ContractId VaultShareHolding, Decimal)
+      with
+        depositor : Party              -- Who is depositing
+        depositAmount : Decimal        -- Amount of underlying to deposit
+        receiver : Party               -- Who receives the shares (usually depositor)
+        depositReason : Text           -- Reason for deposit
+      controller depositor, id.admin
+      do
+        -- Validate deposit
+        assertMsg "Deposit amount must be positive" (depositAmount > 0.0)
+        assertMsg "Below minimum deposit" (depositAmount >= config.minDeposit)
+        
+        -- Check deposit limit
+        maxDep <- exercise self MaxDeposit with receiver
+        assertMsg "Exceeds deposit limit" (depositAmount <= maxDep)
+        
+        -- Calculate shares to mint
+        let sharesToMint = calculateShares depositAmount state
+        assertMsg "Would mint zero shares" (sharesToMint > 0.0)
+        
+        -- NOTE: In a full implementation, we would:
+        -- 1. Verify depositor has sufficient underlying holdings
+        -- 2. Transfer underlying assets to vault
+        -- 3. Use CIP-0056 TransferFactory pattern for the transfer
+        
+        -- Mint shares for receiver
+        now <- getTime
+        sharesCid <- create VaultShareHolding with
+          vault = id
+          owner = receiver
+          amount = sharesToMint
+          holdingLock = None
+          createdAt = now
+          meta = setMetaValue txKindKey "mint" $
+                 setMetaValue senderKey (partyToText depositor) $
+                 setMetaValue reasonKey depositReason []
+        
+        -- Update vault state
+        newVaultCid <- create this with
+          state = state with
+            totalAssets = state.totalAssets + depositAmount
+            totalShares = state.totalShares + sharesToMint
+            lastFeeAccrual = now
+        
+        return (newVaultCid, sharesCid, sharesToMint)
+
+    -- | Mint exact shares by depositing required assets
+    -- Calculates how many assets needed for desired shares
+    choice Mint : (ContractId Vault, ContractId VaultShareHolding, Decimal)
+      with
+        minter : Party
+        sharesToMint : Decimal         -- Exact shares wanted
+        receiver : Party
+        mintReason : Text
+      controller minter, id.admin
+      do
+        assertMsg "Shares must be positive" (sharesToMint > 0.0)
+        
+        -- Calculate assets required (round UP to favor vault)
+        let assetsRequired = if state.totalShares == 0.0
+              then sharesToMint
+              else (sharesToMint * state.totalAssets / state.totalShares) + 0.0000000001
+        
+        -- Now do a deposit with calculated assets
+        exercise self Deposit with
+          depositor = minter
+          depositAmount = assetsRequired
+          receiver = receiver
+          depositReason = mintReason
+
+    -- | Redeem shares for underlying assets
+    -- Burns shares and returns proportional assets
+    choice Redeem : (ContractId Vault, Decimal)
+      with
+        redeemer : Party
+        sharesToRedeem : Decimal
+        receiver : Party               -- Who receives the assets
+        shareHoldingCid : ContractId VaultShareHolding
+        redeemReason : Text
+      controller redeemer, id.admin
+      do
+        -- Fetch and validate share holding
+        shareHolding <- fetch shareHoldingCid
+        assertMsg "Not owner of shares" (shareHolding.owner == redeemer)
+        assertMsg "Wrong vault" (shareHolding.vault == id)
+        assertMsg "Shares are locked" (isNone shareHolding.holdingLock)
+        assertMsg "Insufficient shares" (shareHolding.amount >= sharesToRedeem)
+        
+        -- Calculate assets to return
+        let assetsToReturn = calculateAssets sharesToRedeem state
+        assertMsg "Would return zero assets" (assetsToReturn > 0.0)
+        assertMsg "Vault has insufficient assets" (state.totalAssets >= assetsToReturn)
+        
+        now <- getTime
+        
+        -- Handle share holding
+        if shareHolding.amount == sharesToRedeem
+          then do
+            -- Burn entire holding
+            exercise shareHoldingCid Burn with reason = redeemReason
+          else do
+            -- Split and burn partial
+            (burnCid, _keepCid) <- exercise shareHoldingCid Split with
+              splitAmount = sharesToRedeem
+              reason = redeemReason
+            exercise burnCid Burn with reason = redeemReason
+        
+        -- NOTE: In full implementation, create underlying asset holding for receiver
+        -- using CIP-0056 pattern
+        
+        -- Update vault state
+        newVaultCid <- create this with
+          state = state with
+            totalAssets = state.totalAssets - assetsToReturn
+            totalShares = state.totalShares - sharesToRedeem
+            lastFeeAccrual = now
+        
+        return (newVaultCid, assetsToReturn)
+
+    -- | Withdraw exact assets by redeeming required shares
+    choice Withdraw : (ContractId Vault, Decimal)
+      with
+        withdrawer : Party
+        assetsToWithdraw : Decimal
+        receiver : Party
+        shareHoldingCid : ContractId VaultShareHolding
+        withdrawReason : Text
+      controller withdrawer, id.admin
+      do
+        assertMsg "Assets must be positive" (assetsToWithdraw > 0.0)
+        assertMsg "Vault has insufficient assets" (state.totalAssets >= assetsToWithdraw)
+        
+        -- Calculate shares needed (round UP to favor vault)
+        let sharesRequired = if state.totalAssets == 0.0
+              then assetsToWithdraw
+              else (assetsToWithdraw * state.totalShares / state.totalAssets) + 0.0000000001
+        
+        -- Redeem calculated shares
+        exercise self Redeem with
+          redeemer = withdrawer
+          sharesToRedeem = sharesRequired
+          receiver = receiver
+          shareHoldingCid = shareHoldingCid
+          redeemReason = withdrawReason
+
+    -- ===== Admin Operations =====
+
+    -- | Update vault configuration
+    choice UpdateConfig : ContractId Vault
+      with
+        newConfig : VaultConfig
+        updateReason : Text
+      controller id.admin
+      do
+        now <- getTime
+        let newMeta = setMetaValue reasonKey updateReason meta
+        create this with
+          config = newConfig
+          state = state with lastFeeAccrual = now
+          meta = newMeta
+
+    -- | Accrue management fees (simplified - just updates timestamp)
+    choice AccrueFees : ContractId Vault
+      controller id.admin
+      do
+        now <- getTime
+        -- Simplified fee accrual - full impl would calculate based on time elapsed
+        create this with
+          state = state with
+            lastFeeAccrual = now
+
+
+-- | Factory for creating new vaults
+template VaultFactory
+  with
+    admin : Party                      -- Who can create vaults
+    meta : Metadata
+  where
+    signatory admin
+
+    -- | Create a new vault
+    nonconsuming choice CreateVault : ContractId Vault
+      with
+        vaultName : Text
+        vaultConfig : VaultConfig
+      controller admin
+      do
+        now <- getTime
+        let vaultId = VaultId with
+              admin = admin
+              name = vaultName
+        
+        create Vault with
+          id = vaultId
+          config = vaultConfig
+          state = VaultState with
+            totalAssets = 0.0
+            totalShares = 0.0
+            lastFeeAccrual = now
+          meta = setMetaValue "splice.lfdecentralizedtrust.org/registry-urls" "" meta
+
+
+-- Helper to convert microseconds to seconds
+convertMicrosecondsToSeconds : Int -> Int
+convertMicrosecondsToSeconds us = us / 1000000

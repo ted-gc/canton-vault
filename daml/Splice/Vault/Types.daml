@@ -1,0 +1,115 @@
+-- | Core types for Canton Vault implementation
+-- Implements ERC-4626 vault concepts for Canton Network
+module Splice.Vault.Types where
+
+import DA.Time
+import DA.Optional
+
+-- | Unique identifier for a vault instance
+data VaultId = VaultId with
+    admin : Party          -- Vault administrator/registry
+    name : Text            -- Human-readable vault name
+  deriving (Eq, Show, Ord)
+
+-- | Instrument identifier following CIP-0056 pattern
+data InstrumentId = InstrumentId with
+    admin : Party          -- Token registry admin party
+    id : Text              -- Token identifier (e.g., "Amulet", "USDC")
+  deriving (Eq, Show, Ord)
+
+-- | Vault configuration parameters
+data VaultConfig = VaultConfig with
+    underlyingAsset : InstrumentId     -- Asset the vault holds
+    shareInstrumentId : Text           -- ID for vault share token
+    depositLimit : Optional Decimal    -- Max total deposits (None = unlimited)
+    minDeposit : Decimal               -- Minimum deposit amount
+    withdrawalDelay : Optional Int     -- Microseconds delay for async (None = sync)
+    managementFeeBps : Int             -- Annual management fee in basis points
+    performanceFeeBps : Int            -- Performance fee in basis points
+  deriving (Eq, Show)
+
+-- | Current vault state snapshot
+data VaultState = VaultState with
+    totalAssets : Decimal     -- Total underlying assets under management
+    totalShares : Decimal     -- Total vault shares outstanding
+    lastFeeAccrual : Time     -- Last time management fees were accrued
+  deriving (Eq, Show)
+
+-- | Status of an async deposit/redeem request (EIP-7540)
+data RequestStatus 
+    = Pending      -- Request submitted, waiting for processing
+    | Claimable    -- Request processed, ready to claim
+    | Claimed      -- Request claimed, shares/assets distributed
+    | Cancelled    -- Request cancelled (expired or user-initiated)
+  deriving (Eq, Show, Ord)
+
+-- | Transfer instruction status (CIP-0056)
+data InstructionStatus
+    = InstructionPending
+    | InstructionCompleted
+    | InstructionAborted
+  deriving (Eq, Show, Ord)
+
+-- | Lock information for holdings
+data HoldingLock = HoldingLock with
+    lockHolder : Party        -- Who holds the lock
+    context : Text            -- Human-readable lock context
+    expiresAt : Optional Time -- When lock expires (None = manual unlock)
+  deriving (Eq, Show)
+
+-- | Generic metadata map following CIP-0056 pattern
+type Metadata = [(Text, Text)]
+
+-- | Helper to get metadata value
+getMetaValue : Text -> Metadata -> Optional Text
+getMetaValue key meta = 
+    case filter (\(k, _) -> k == key) meta of
+        [(_, v)] -> Some v
+        _ -> None
+
+-- | Helper to set metadata value
+setMetaValue : Text -> Text -> Metadata -> Metadata
+setMetaValue key value meta = 
+    (key, value) :: filter (\(k, _) -> k /= key) meta
+
+-- | Standard metadata keys per CIP-0056
+txKindKey : Text
+txKindKey = "splice.lfdecentralizedtrust.org/tx-kind"
+
+senderKey : Text
+senderKey = "splice.lfdecentralizedtrust.org/sender"
+
+reasonKey : Text
+reasonKey = "splice.lfdecentralizedtrust.org/reason"
+
+-- | ERC-4626 rounding helper - always round down (favor vault)
+roundDown : Decimal -> Decimal
+roundDown d = 
+    let scaled = d * 10000000000.0  -- 10 decimal places (max for Numeric 10)
+        truncated = intToDecimal (truncate scaled)
+    in truncated / 10000000000.0
+
+-- | Calculate shares for a deposit
+-- Formula: shares = assets * totalShares / totalAssets
+-- First deposit: 1:1 ratio
+calculateShares : Decimal -> VaultState -> Decimal
+calculateShares assets state =
+    if state.totalShares == 0.0 
+        then assets  -- First deposit gets 1:1
+        else roundDown (assets * state.totalShares / state.totalAssets)
+
+-- | Calculate assets for a redemption
+-- Formula: assets = shares * totalAssets / totalShares
+calculateAssets : Decimal -> VaultState -> Decimal
+calculateAssets shares state =
+    if state.totalAssets == 0.0 || state.totalShares == 0.0
+        then shares  -- Edge case: empty vault
+        else roundDown (shares * state.totalAssets / state.totalShares)
+
+-- | Get current share price
+-- Price = totalAssets / totalShares
+sharePrice : VaultState -> Decimal
+sharePrice state =
+    if state.totalShares == 0.0
+        then 1.0  -- Default price for empty vault
+        else state.totalAssets / state.totalShares

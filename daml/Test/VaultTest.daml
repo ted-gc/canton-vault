@@ -1,0 +1,122 @@
+-- | Test script for Canton Vault
+-- Validates basic deposit/redeem flow
+module Test.VaultTest where
+
+import Daml.Script
+import DA.Optional
+import Splice.Vault.Types
+import Splice.Vault.Vault
+import Splice.Vault.VaultShares
+
+-- | Basic test: Create vault, deposit, check shares, redeem
+testBasicVaultFlow : Script ()
+testBasicVaultFlow = script do
+  -- Setup parties
+  admin <- allocateParty "VaultAdmin"
+  alice <- allocateParty "Alice"
+  bob <- allocateParty "Bob"
+  
+  debug "=== Creating Vault Factory ==="
+  
+  -- Create vault factory
+  factoryCid <- submit admin do
+    createCmd VaultFactory with
+      admin = admin
+      meta = []
+  
+  debug "=== Creating Vault ==="
+  
+  -- Create a vault
+  let vaultConfig = VaultConfig with
+        underlyingAsset = InstrumentId admin "TestToken"
+        shareInstrumentId = "TestVault-SHARES"
+        depositLimit = Some 1000000.0
+        minDeposit = 0.01
+        withdrawalDelay = None
+        managementFeeBps = 200
+        performanceFeeBps = 1000
+  
+  vaultCid <- submit admin do
+    exerciseCmd factoryCid CreateVault with
+      vaultName = "TestVault"
+      vaultConfig = vaultConfig
+  
+  debug "=== Vault Created ==="
+  
+  -- Verify initial state
+  state <- submit admin do
+    exerciseCmd vaultCid GetTotalAssets
+  debug $ "Initial totalAssets: " <> show state
+  
+  -- First deposit by Alice
+  debug "=== Alice Depositing 100 tokens ==="
+  
+  (vaultCid', aliceSharesCid, aliceShares) <- submitMulti [alice, admin] [] do
+    exerciseCmd vaultCid Deposit with
+      depositor = alice
+      depositAmount = 100.0
+      receiver = alice
+      depositReason = "Initial deposit"
+  
+  debug $ "Alice received shares: " <> show aliceShares
+  
+  -- Verify first deposit gets 1:1 ratio
+  assertMsg "First deposit should get 1:1 shares" (aliceShares == 100.0)
+  
+  -- Check vault state after deposit
+  newTotalAssets <- submit admin do
+    exerciseCmd vaultCid' GetTotalAssets
+  debug $ "TotalAssets after Alice deposit: " <> show newTotalAssets
+  assertMsg "TotalAssets should be 100" (newTotalAssets == 100.0)
+  
+  -- Check share price
+  price <- submit admin do
+    exerciseCmd vaultCid' GetSharePrice
+  debug $ "Share price: " <> show price
+  assertMsg "Share price should be 1.0" (price == 1.0)
+  
+  -- Second deposit by Bob
+  debug "=== Bob Depositing 50 tokens ==="
+  
+  (vaultCid'', bobSharesCid, bobShares) <- submitMulti [bob, admin] [] do
+    exerciseCmd vaultCid' Deposit with
+      depositor = bob
+      depositAmount = 50.0
+      receiver = bob
+      depositReason = "Second deposit"
+  
+  debug $ "Bob received shares: " <> show bobShares
+  assertMsg "Bob should get 50 shares" (bobShares == 50.0)
+  
+  -- Check total state
+  totalShares <- submit admin do
+    exerciseCmd vaultCid'' GetTotalShares
+  debug $ "Total shares: " <> show totalShares
+  assertMsg "Total shares should be 150" (totalShares == 150.0)
+  
+  -- Alice redeems half her shares
+  debug "=== Alice Redeeming 50 shares ==="
+  
+  (vaultCid''', aliceAssets) <- submitMulti [alice, admin] [] do
+    exerciseCmd vaultCid'' Redeem with
+      redeemer = alice
+      sharesToRedeem = 50.0
+      receiver = alice
+      shareHoldingCid = aliceSharesCid
+      redeemReason = "Partial withdrawal"
+  
+  debug $ "Alice received assets: " <> show aliceAssets
+  assertMsg "Alice should get 50 assets" (aliceAssets == 50.0)
+  
+  -- Final state check
+  finalAssets <- submit admin do
+    exerciseCmd vaultCid''' GetTotalAssets
+  finalShares <- submit admin do
+    exerciseCmd vaultCid''' GetTotalShares
+  
+  debug $ "Final state - Assets: " <> show finalAssets <> ", Shares: " <> show finalShares
+  assertMsg "Final assets should be 100" (finalAssets == 100.0)
+  assertMsg "Final shares should be 100" (finalShares == 100.0)
+  
+  debug "=== Test Passed! ==="
+  return ()

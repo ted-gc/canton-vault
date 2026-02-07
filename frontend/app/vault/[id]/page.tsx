@@ -99,8 +99,19 @@ export default function VaultDetailPage({ params }: { params: { id: string } }) 
       </section>
 
       <section className="grid gap-4 md:grid-cols-2">
-        <DepositForm vaultId={vault.id} party={party} onComplete={onRefresh} />
-        <RedeemForm vaultId={vault.id} party={party} onComplete={onRefresh} />
+        <DepositForm 
+          vaultId={vault.id} 
+          party={party} 
+          sharePrice={vault.sharePrice}
+          onComplete={onRefresh} 
+        />
+        <RedeemForm 
+          vaultId={vault.id} 
+          party={party} 
+          sharePrice={vault.sharePrice}
+          userShares={holdings?.shares ?? 0}
+          onComplete={onRefresh} 
+        />
       </section>
 
       <section className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-5">

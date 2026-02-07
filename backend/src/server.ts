@@ -1,10 +1,12 @@
 import express, { Request, Response, NextFunction } from "express";
+import cors from "cors";
 import { LedgerClient } from "./ledger/client.js";
 import { createVaultRouter } from "./api/vault.js";
 import { createRegistryRouter } from "./api/registry.js";
 import { VaultService } from "./services/vault.js";
 
 const app = express();
+app.use(cors());
 app.use(express.json());
 
 const ledger = new LedgerClient();

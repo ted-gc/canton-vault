@@ -65,12 +65,16 @@ export interface DepositRequest {
   party: string;
   amount: number;
   underlyingHoldingCid?: string;
+  receiver?: string;
+  reason?: string;
 }
 
 export interface RedeemRequest {
   party: string;
   shares: number;
   shareHoldingCid?: string;
+  receiver?: string;
+  reason?: string;
 }
 
 // ===== Demo Data (used when ledger unavailable) =====

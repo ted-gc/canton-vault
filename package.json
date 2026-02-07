@@ -1,0 +1,11 @@
+{
+  "name": "canton-vault",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": "./scripts/test.sh",
+    "verify": "./scripts/verify-all.sh",
+    "dev": "cd backend && npm run dev",
+    "dev:frontend": "cd frontend && npm run dev"
+  }
+}

@@ -1,12 +1,13 @@
 -- | Test script for Canton Vault
--- Validates basic deposit/redeem flow
+-- Validates basic deposit/redeem flow with CIP-0056 holdings
 module Test.VaultTest where
 
 import Daml.Script
 import DA.Optional
 import Splice.Vault.Types
 import Splice.Vault.Vault
-import Splice.Vault.VaultShares
+import Splice.Vault.VaultShares qualified as Shares
+import Splice.Vault.UnderlyingHolding qualified as Underlying
 
 -- | Basic test: Create vault, deposit, check shares, redeem
 testBasicVaultFlow : Script ()
@@ -48,8 +49,35 @@ testBasicVaultFlow = script do
     exerciseCmd vaultCid GetTotalAssets
   debug $ "Initial totalAssets: " <> show state
   
-  -- First deposit by Alice
+  -- Create underlying token holdings for Alice and Bob
+  debug "=== Minting underlying tokens ==="
+  
+  now <- getTime
+  aliceUnderlyingCid <- submit alice do
+    createCmd Underlying.UnderlyingAssetHolding with
+      instrument = InstrumentId admin "TestToken"
+      owner = alice
+      amount = 1000.0
+      holdingLock = None
+      createdAt = now
+      meta = []
+  
+  bobUnderlyingCid <- submit bob do
+    createCmd Underlying.UnderlyingAssetHolding with
+      instrument = InstrumentId admin "TestToken"
+      owner = bob
+      amount = 500.0
+      holdingLock = None
+      createdAt = now
+      meta = []
+  
   debug "=== Alice Depositing 100 tokens ==="
+  
+  -- Alice needs to split her holding to deposit just 100
+  (aliceDepositCid, aliceRemainderCid) <- submitMulti [alice, admin] [] do
+    exerciseCmd aliceUnderlyingCid Underlying.Split with
+      splitAmount = 100.0
+      reason = "For vault deposit"
   
   (vaultCid', aliceSharesCid, aliceShares) <- submitMulti [alice, admin] [] do
     exerciseCmd vaultCid Deposit with
@@ -57,6 +85,7 @@ testBasicVaultFlow = script do
       depositAmount = 100.0
       receiver = alice
       depositReason = "Initial deposit"
+      underlyingHoldingCid = aliceDepositCid
   
   debug $ "Alice received shares: " <> show aliceShares
   
@@ -75,8 +104,13 @@ testBasicVaultFlow = script do
   debug $ "Share price: " <> show price
   assertMsg "Share price should be 1.0" (price == 1.0)
   
-  -- Second deposit by Bob
   debug "=== Bob Depositing 50 tokens ==="
+  
+  -- Bob splits and deposits
+  (bobDepositCid, _bobRemainderCid) <- submitMulti [bob, admin] [] do
+    exerciseCmd bobUnderlyingCid Underlying.Split with
+      splitAmount = 50.0
+      reason = "For vault deposit"
   
   (vaultCid'', bobSharesCid, bobShares) <- submitMulti [bob, admin] [] do
     exerciseCmd vaultCid' Deposit with
@@ -84,6 +118,7 @@ testBasicVaultFlow = script do
       depositAmount = 50.0
       receiver = bob
       depositReason = "Second deposit"
+      underlyingHoldingCid = bobDepositCid
   
   debug $ "Bob received shares: " <> show bobShares
   assertMsg "Bob should get 50 shares" (bobShares == 50.0)
@@ -97,7 +132,7 @@ testBasicVaultFlow = script do
   -- Alice redeems half her shares
   debug "=== Alice Redeeming 50 shares ==="
   
-  (vaultCid''', aliceAssets) <- submitMulti [alice, admin] [] do
+  (vaultCid''', aliceUnderlyingBack, aliceAssets) <- submitMulti [alice, admin] [] do
     exerciseCmd vaultCid'' Redeem with
       redeemer = alice
       sharesToRedeem = 50.0
@@ -107,6 +142,14 @@ testBasicVaultFlow = script do
   
   debug $ "Alice received assets: " <> show aliceAssets
   assertMsg "Alice should get 50 assets" (aliceAssets == 50.0)
+  
+  -- Verify Alice got an underlying holding back
+  aliceRedeemed <- queryContractId alice aliceUnderlyingBack
+  case aliceRedeemed of
+    Some holding -> do
+      assertMsg "Alice should own redeemed tokens" (holding.owner == alice)
+      assertMsg "Redeemed amount should be 50" (holding.amount == 50.0)
+    None -> abort "Alice's redeemed holding not found"
   
   -- Final state check
   finalAssets <- submit admin do

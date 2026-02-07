@@ -1,16 +1,14 @@
--- | Canton Vault - convenience module for all vault components
+-- | Canton Vault - convenience module
+-- 
+-- Due to overlapping choice names (Split, Merge, etc.), import modules directly:
+--   import Splice.Vault.Types
+--   import Splice.Vault.VaultShares qualified as Shares
+--   import Splice.Vault.UnderlyingHolding qualified as Underlying
+--   import Splice.Vault.Vault
+--   import Splice.Vault.AsyncRequests
+--   import Splice.Vault.TransferFactory
 module Splice.Vault.All 
   ( module Splice.Vault.Types
-  , module Splice.Vault.UnderlyingHolding
-  , module Splice.Vault.VaultShares
-  , module Splice.Vault.Vault
-  , module Splice.Vault.AsyncRequests
-  , module Splice.Vault.TransferFactory
   ) where
 
 import Splice.Vault.Types
-import Splice.Vault.UnderlyingHolding
-import Splice.Vault.VaultShares
-import Splice.Vault.Vault
-import Splice.Vault.AsyncRequests
-import Splice.Vault.TransferFactory

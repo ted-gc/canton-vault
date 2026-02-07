@@ -8,9 +8,8 @@ import DA.Time
 import DA.List (head)
 import DA.Optional
 import Splice.Vault.Types
-import Splice.Vault.VaultShares
-import Splice.Vault.UnderlyingHolding
-import Splice.Vault.UnderlyingHolding
+import Splice.Vault.VaultShares qualified as Shares
+import Splice.Vault.UnderlyingHolding qualified as Underlying
 
 -- | Main vault contract
 -- Manages deposits, withdrawals, and share accounting
@@ -83,13 +82,13 @@ template Vault
 
     -- | Deposit assets and receive shares
     -- Mints shares proportional to deposit relative to total assets
-    choice Deposit : (ContractId Vault, ContractId VaultShareHolding, Decimal)
+    choice Deposit : (ContractId Vault, ContractId Shares.VaultShareHolding, Decimal)
       with
         depositor : Party                                    -- Who is depositing
         depositAmount : Decimal                              -- Amount of underlying to deposit
         receiver : Party                                     -- Who receives shares
         depositReason : Text                                 -- Reason for deposit
-        underlyingHoldingCid : ContractId UnderlyingAssetHolding  -- CIP-0056 holding to consume
+        underlyingHoldingCid : ContractId Underlying.UnderlyingAssetHolding  -- CIP-0056 holding to consume
       controller depositor, id.admin
       do
         -- Validate deposit amount
@@ -114,22 +113,22 @@ template Vault
         -- Transfer underlying to vault custody (CIP-0056 compliant)
         if underlying.amount == depositAmount
           then do
-            exercise underlyingHoldingCid TransferUnderlying with
+            exercise underlyingHoldingCid Underlying.Transfer with
               newOwner = id.admin
               reason = "Deposit to vault: " <> id.name
             return ()
           else do
-            (depositCid, _changeCid) <- exercise underlyingHoldingCid SplitUnderlying with
+            (depositCid, _changeCid) <- exercise underlyingHoldingCid Underlying.Split with
               splitAmount = depositAmount
               reason = depositReason
-            exercise depositCid TransferUnderlying with
+            exercise depositCid Underlying.Transfer with
               newOwner = id.admin
               reason = "Deposit to vault: " <> id.name
             return ()
 
         -- Mint shares for receiver
         now <- getTime
-        sharesCid <- create VaultShareHolding with
+        sharesCid <- create Shares.VaultShareHolding with
           vault = id
           owner = receiver
           amount = sharesToMint
@@ -150,12 +149,12 @@ template Vault
 
     -- | Mint exact shares by depositing required assets
     -- CIP-0056 compliant: takes underlying holding, may return change
-    choice Mint : (ContractId Vault, ContractId VaultShareHolding, Decimal, Optional (ContractId UnderlyingAssetHolding))
+    choice Mint : (ContractId Vault, ContractId Shares.VaultShareHolding, Decimal, Optional (ContractId Underlying.UnderlyingAssetHolding))
       with
         minter : Party
         sharesToMint : Decimal         -- Exact shares wanted
         receiver : Party
-        underlyingHoldingCid : ContractId UnderlyingAssetHolding
+        underlyingHoldingCid : ContractId Underlying.UnderlyingAssetHolding
         mintReason : Text
       controller minter, id.admin
       do
@@ -177,7 +176,7 @@ template Vault
         (depositCid, changeCid) <- if underlying.amount == assetsRequired
           then return (underlyingHoldingCid, None)
           else do
-            (exactCid, changeCid) <- exercise underlyingHoldingCid Split with
+            (exactCid, changeCid) <- exercise underlyingHoldingCid Underlying.Split with
               splitAmount = assetsRequired
               reason = mintReason
             return (exactCid, Some changeCid)
@@ -194,12 +193,12 @@ template Vault
 
     -- | Redeem shares for underlying assets
     -- Burns shares and creates CIP-0056 underlying holding for receiver
-    choice Redeem : (ContractId Vault, ContractId UnderlyingAssetHolding, Decimal)
+    choice Redeem : (ContractId Vault, ContractId Underlying.UnderlyingAssetHolding, Decimal)
       with
         redeemer : Party
         sharesToRedeem : Decimal
         receiver : Party               -- Who receives the assets
-        shareHoldingCid : ContractId VaultShareHolding
+        shareHoldingCid : ContractId Shares.VaultShareHolding
         redeemReason : Text
       controller redeemer, id.admin
       do
@@ -221,16 +220,16 @@ template Vault
         if shareHolding.amount == sharesToRedeem
           then do
             -- Burn entire holding
-            exercise shareHoldingCid Burn with reason = redeemReason
+            exercise shareHoldingCid Shares.Burn with reason = redeemReason
           else do
             -- Split and burn partial
-            (burnCid, _keepCid) <- exercise shareHoldingCid Split with
+            (burnCid, _keepCid) <- exercise shareHoldingCid Shares.Split with
               splitAmount = sharesToRedeem
               reason = redeemReason
-            exercise burnCid Burn with reason = redeemReason
+            exercise burnCid Shares.Burn with reason = redeemReason
         
         -- Create underlying asset holding for receiver (CIP-0056 compliant)
-        underlyingCid <- create UnderlyingAssetHolding with
+        underlyingCid <- create Underlying.UnderlyingAssetHolding with
           instrument = config.underlyingAsset
           owner = receiver
           amount = assetsToReturn
@@ -250,12 +249,12 @@ template Vault
         return (newVaultCid, underlyingCid, assetsToReturn)
 
     -- | Withdraw exact assets by redeeming required shares
-    choice Withdraw : (ContractId Vault, ContractId UnderlyingAssetHolding, Decimal)
+    choice Withdraw : (ContractId Vault, ContractId Underlying.UnderlyingAssetHolding, Decimal)
       with
         withdrawer : Party
         assetsToWithdraw : Decimal
         receiver : Party
-        shareHoldingCid : ContractId VaultShareHolding
+        shareHoldingCid : ContractId Shares.VaultShareHolding
         withdrawReason : Text
       controller withdrawer, id.admin
       do

@@ -30,7 +30,11 @@ else
   DOCKER_AVAILABLE=0
 fi
 
-if command -v daml &> /dev/null; then
+if [ -x "$HOME/.daml/bin/daml" ]; then
+  export PATH="$HOME/.daml/bin:$PATH"
+  echo "   ✅ Daml SDK: $($HOME/.daml/bin/daml version 2>/dev/null | head -1 || echo 'installed')"
+  DAML_AVAILABLE=1
+elif command -v daml &> /dev/null; then
   echo "   ✅ Daml SDK: $(daml version | head -1)"
   DAML_AVAILABLE=1
 else

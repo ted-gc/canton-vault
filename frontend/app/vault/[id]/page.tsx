@@ -18,7 +18,9 @@ export default function VaultDetailPage({ params }: { params: { id: string } }) 
     try {
       const data = await getVault(params.id);
       setVault(data);
-      const acct = accountOverride ?? (await getPrimaryAccount().catch(() => null));
+      // Check for demo party in localStorage, then real wallet
+      const demoParty = localStorage.getItem("demo-party");
+      const acct = accountOverride ?? demoParty ?? (await getPrimaryAccount().catch(() => null));
       setParty(acct);
       if (acct) {
         const h = await getHoldings(params.id, acct);
@@ -33,12 +35,20 @@ export default function VaultDetailPage({ params }: { params: { id: string } }) 
 
   useEffect(() => {
     load();
-    const handler = (event: Event) => {
+    const connectHandler = (event: Event) => {
       const acct = (event as CustomEvent<string>).detail;
       load(acct);
     };
-    window.addEventListener("wallet:connected", handler as EventListener);
-    return () => window.removeEventListener("wallet:connected", handler as EventListener);
+    const disconnectHandler = () => {
+      setParty(null);
+      setHoldings(null);
+    };
+    window.addEventListener("wallet:connected", connectHandler as EventListener);
+    window.addEventListener("wallet:disconnected", disconnectHandler);
+    return () => {
+      window.removeEventListener("wallet:connected", connectHandler as EventListener);
+      window.removeEventListener("wallet:disconnected", disconnectHandler);
+    };
   }, [params.id]);
 
   const onRefresh = async () => {

@@ -26,14 +26,14 @@ export function createVaultRouter(service: VaultService): Router {
   router.post("/api/vaults/:id/deposit", async (req: Request, res: Response) => {
     try {
       const { party, amount, underlyingHoldingCid, receiver, reason } = req.body ?? {};
-      if (!party || typeof amount !== "number" || !underlyingHoldingCid) {
-        return res
-          .status(400)
-          .json({ error: "party, amount, and underlyingHoldingCid are required" });
+      // Support string or number for amount
+      const numAmount = typeof amount === "string" ? parseFloat(amount) : amount;
+      if (!party || typeof numAmount !== "number" || isNaN(numAmount)) {
+        return res.status(400).json({ error: "party and amount are required" });
       }
       const result = await service.deposit(req.params.id, {
         party,
-        amount,
+        amount: numAmount,
         underlyingHoldingCid,
         receiver,
         reason,
@@ -47,14 +47,14 @@ export function createVaultRouter(service: VaultService): Router {
   router.post("/api/vaults/:id/redeem", async (req: Request, res: Response) => {
     try {
       const { party, shares, shareHoldingCid, receiver, reason } = req.body ?? {};
-      if (!party || typeof shares !== "number" || !shareHoldingCid) {
-        return res
-          .status(400)
-          .json({ error: "party, shares, and shareHoldingCid are required" });
+      // Support string or number for shares
+      const numShares = typeof shares === "string" ? parseFloat(shares) : shares;
+      if (!party || typeof numShares !== "number" || isNaN(numShares)) {
+        return res.status(400).json({ error: "party and shares are required" });
       }
       const result = await service.redeem(req.params.id, {
         party,
-        shares,
+        shares: numShares,
         shareHoldingCid,
         receiver,
         reason,
@@ -71,6 +71,21 @@ export function createVaultRouter(service: VaultService): Router {
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message ?? "Holdings lookup failed" });
+    }
+  });
+
+  // ===== Underlying Holdings =====
+
+  router.get("/api/underlying/:party", async (req: Request, res: Response) => {
+    try {
+      const { instrument } = req.query;
+      const result = await service.getUnderlyingHoldings(
+        req.params.party,
+        typeof instrument === "string" ? instrument : undefined
+      );
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message ?? "Underlying lookup failed" });
     }
   });
 

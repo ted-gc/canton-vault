@@ -1,4 +1,7 @@
-import { LedgerClient } from "../ledger/client.js";
+import { LedgerClient, Contract } from "../ledger/client.js";
+
+const VAULT_TEMPLATE = "Splice.Vault.Vault:Vault";
+const SHARE_HOLDING_TEMPLATE = "Splice.Vault.VaultShares:VaultShareHolding";
 
 export interface VaultSummary {
   id: string;
@@ -16,96 +19,147 @@ export interface VaultHolding {
 export interface DepositRequest {
   party: string;
   amount: number;
+  underlyingHoldingCid: string;
+  receiver?: string;
+  reason?: string;
 }
 
 export interface RedeemRequest {
   party: string;
   shares: number;
+  shareHoldingCid: string;
+  receiver?: string;
+  reason?: string;
 }
 
-const defaultVaults: VaultSummary[] = [
-  {
-    id: "vault-1",
-    name: "Canton USD Vault",
-    totalAssets: 1_000_000,
-    totalShares: 1_000_000,
-    sharePrice: 1.0,
-  },
-];
+type VaultPayload = {
+  id?: { admin?: string; name?: string };
+  state?: { totalAssets?: string | number; totalShares?: string | number };
+};
 
-// Simple in-memory holdings cache for demo purposes.
-const holdings: Record<string, Record<string, number>> = {
-  "vault-1": {
-    "party-1": 1000,
-  },
+type HoldingPayload = {
+  vault?: { name?: string };
+  owner?: string;
+  amount?: string | number;
+};
+
+const toNumber = (value: string | number | undefined): number => {
+  if (value === undefined) return 0;
+  return typeof value === "string" ? Number(value) : value;
 };
 
 export class VaultService {
   constructor(private ledger: LedgerClient) {}
 
-  listVaults(): VaultSummary[] {
-    return defaultVaults;
+  private async getVaultContracts(): Promise<Contract<VaultPayload>[]> {
+    return this.ledger.queryContracts<VaultPayload>(VAULT_TEMPLATE);
   }
 
-  getVault(id: string): VaultSummary | undefined {
-    return defaultVaults.find((v) => v.id === id);
+  private async findVaultContract(vaultId: string): Promise<Contract<VaultPayload>> {
+    const vaults = await this.getVaultContracts();
+    const match = vaults.find(
+      (vault) => vault.contractId === vaultId || vault.payload?.id?.name === vaultId
+    );
+    if (!match) throw new Error("Vault not found");
+    return match;
   }
 
-  getHoldings(vaultId: string, party: string): VaultHolding {
-    const shares = holdings[vaultId]?.[party] ?? 0;
+  async listVaults(): Promise<VaultSummary[]> {
+    const vaults = await this.getVaultContracts();
+    return vaults.map((vault) => {
+      const totalAssets = toNumber(vault.payload?.state?.totalAssets);
+      const totalShares = toNumber(vault.payload?.state?.totalShares);
+      const sharePrice = totalShares === 0 ? 1 : totalAssets / totalShares;
+      const name = vault.payload?.id?.name ?? vault.contractId;
+
+      return {
+        id: vault.contractId,
+        name,
+        totalAssets,
+        totalShares,
+        sharePrice,
+      };
+    });
+  }
+
+  async getVault(id: string): Promise<VaultSummary | undefined> {
+    const vaults = await this.listVaults();
+    return vaults.find((vault) => vault.id === id || vault.name === id);
+  }
+
+  async getHoldings(vaultId: string, party: string): Promise<VaultHolding> {
+    const holdings = await this.ledger.queryContracts<HoldingPayload>(SHARE_HOLDING_TEMPLATE, {
+      owner: party,
+    });
+
+    const shares = holdings
+      .filter((holding) => holding.payload?.vault?.name === vaultId)
+      .reduce((sum, holding) => sum + toNumber(holding.payload?.amount), 0);
+
     return { party, shares };
   }
 
   async deposit(vaultId: string, request: DepositRequest): Promise<unknown> {
-    const vault = this.getVault(vaultId);
-    if (!vault) throw new Error("Vault not found");
-
-    // Update simple cache
-    holdings[vaultId] = holdings[vaultId] ?? {};
-    holdings[vaultId][request.party] = (holdings[vaultId][request.party] ?? 0) + request.amount;
-
-    // Optional ledger submission (kept generic)
-    if (process.env.LEDGER_SUBMIT === "true") {
-      await this.ledger.submitCommand({
-        party: request.party,
-        action: "Deposit",
-        vaultId,
-        amount: request.amount,
-      });
+    if (!request.underlyingHoldingCid) {
+      throw new Error("underlyingHoldingCid is required");
     }
 
+    const vault = await this.findVaultContract(vaultId);
+    const vaultAdmin = vault.payload?.id?.admin;
+    const actAs = [request.party, vaultAdmin].filter(Boolean) as string[];
+
+    const response = await this.ledger.exerciseChoice(
+      VAULT_TEMPLATE,
+      vault.contractId,
+      "Deposit",
+      {
+        depositor: request.party,
+        depositAmount: request.amount.toString(),
+        receiver: request.receiver ?? request.party,
+        depositReason: request.reason ?? "user deposit",
+        underlyingHoldingCid: request.underlyingHoldingCid,
+      },
+      actAs
+    );
+
     return {
-      status: "accepted",
-      vaultId,
+      status: "submitted",
+      vaultId: vault.contractId,
       party: request.party,
       amount: request.amount,
+      response,
     };
   }
 
   async redeem(vaultId: string, request: RedeemRequest): Promise<unknown> {
-    const vault = this.getVault(vaultId);
-    if (!vault) throw new Error("Vault not found");
-
-    holdings[vaultId] = holdings[vaultId] ?? {};
-    holdings[vaultId][request.party] = Math.max(
-      0,
-      (holdings[vaultId][request.party] ?? 0) - request.shares
-    );
-
-    if (process.env.LEDGER_SUBMIT === "true") {
-      await this.ledger.submitCommand({
-        party: request.party,
-        action: "Redeem",
-        vaultId,
-        shares: request.shares,
-      });
+    if (!request.shareHoldingCid) {
+      throw new Error("shareHoldingCid is required");
     }
 
+    const vault = await this.findVaultContract(vaultId);
+    const vaultAdmin = vault.payload?.id?.admin;
+    const actAs = [request.party, vaultAdmin].filter(Boolean) as string[];
+
+    const response = await this.ledger.exerciseChoice(
+      VAULT_TEMPLATE,
+      vault.contractId,
+      "Redeem",
+      {
+        redeemer: request.party,
+        sharesToRedeem: request.shares.toString(),
+        receiver: request.receiver ?? request.party,
+        shareHoldingCid: request.shareHoldingCid,
+        redeemReason: request.reason ?? "user redeem",
+      },
+      actAs
+    );
+
     return {
-      status: "accepted",
-      vaultId,
+      status: "submitted",
+      vaultId: vault.contractId,
       party: request.party,
       shares: request.shares,
+      response,
     };
   }
 }

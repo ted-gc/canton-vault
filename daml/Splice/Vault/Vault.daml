@@ -9,6 +9,8 @@ import DA.List (head)
 import DA.Optional
 import Splice.Vault.Types
 import Splice.Vault.VaultShares
+import Splice.Vault.UnderlyingHolding
+import Splice.Vault.UnderlyingHolding
 
 -- | Main vault contract
 -- Manages deposits, withdrawals, and share accounting
@@ -83,29 +85,41 @@ template Vault
     -- Mints shares proportional to deposit relative to total assets
     choice Deposit : (ContractId Vault, ContractId VaultShareHolding, Decimal)
       with
-        depositor : Party              -- Who is depositing
-        depositAmount : Decimal        -- Amount of underlying to deposit
-        receiver : Party               -- Who receives the shares (usually depositor)
-        depositReason : Text           -- Reason for deposit
+        depositor : Party                                    -- Who is depositing
+        depositAmount : Decimal                              -- Amount of underlying to deposit
+        receiver : Party                                     -- Who receives shares
+        depositReason : Text                                 -- Reason for deposit
+        underlyingHoldingCid : ContractId UnderlyingAssetHolding  -- CIP-0056 holding to consume
       controller depositor, id.admin
       do
-        -- Validate deposit
+        -- Validate deposit amount
         assertMsg "Deposit amount must be positive" (depositAmount > 0.0)
         assertMsg "Below minimum deposit" (depositAmount >= config.minDeposit)
-        
+
+        -- Fetch and validate underlying holding
+        underlying <- fetch underlyingHoldingCid
+        assertMsg "Not owner of underlying" (underlying.owner == depositor)
+        assertMsg "Wrong asset type" (underlying.instrument == config.underlyingAsset)
+        assertMsg "Underlying is locked" (isNone underlying.holdingLock)
+        assertMsg "Insufficient underlying" (underlying.amount >= depositAmount)
+
         -- Check deposit limit
         maxDep <- exercise self MaxDeposit with receiver
         assertMsg "Exceeds deposit limit" (depositAmount <= maxDep)
-        
+
         -- Calculate shares to mint
         let sharesToMint = calculateShares depositAmount state
         assertMsg "Would mint zero shares" (sharesToMint > 0.0)
-        
-        -- NOTE: In a full implementation, we would:
-        -- 1. Verify depositor has sufficient underlying holdings
-        -- 2. Transfer underlying assets to vault
-        -- 3. Use CIP-0056 TransferFactory pattern for the transfer
-        
+
+        -- Consume underlying holding
+        if underlying.amount == depositAmount
+          then archive underlyingHoldingCid
+          else do
+            (depositCid, _changeCid) <- exercise underlyingHoldingCid Split with
+              splitAmount = depositAmount
+              reason = depositReason
+            archive depositCid
+
         -- Mint shares for receiver
         now <- getTime
         sharesCid <- create VaultShareHolding with
@@ -117,43 +131,63 @@ template Vault
           meta = setMetaValue txKindKey "mint" $
                  setMetaValue senderKey (partyToText depositor) $
                  setMetaValue reasonKey depositReason []
-        
+
         -- Update vault state
         newVaultCid <- create this with
           state = state with
             totalAssets = state.totalAssets + depositAmount
             totalShares = state.totalShares + sharesToMint
             lastFeeAccrual = now
-        
+
         return (newVaultCid, sharesCid, sharesToMint)
 
     -- | Mint exact shares by depositing required assets
-    -- Calculates how many assets needed for desired shares
-    choice Mint : (ContractId Vault, ContractId VaultShareHolding, Decimal)
+    -- CIP-0056 compliant: takes underlying holding, may return change
+    choice Mint : (ContractId Vault, ContractId VaultShareHolding, Decimal, Optional (ContractId UnderlyingAssetHolding))
       with
         minter : Party
         sharesToMint : Decimal         -- Exact shares wanted
         receiver : Party
+        underlyingHoldingCid : ContractId UnderlyingAssetHolding
         mintReason : Text
       controller minter, id.admin
       do
         assertMsg "Shares must be positive" (sharesToMint > 0.0)
-        
+
+        -- Fetch underlying to check amount
+        underlying <- fetch underlyingHoldingCid
+        assertMsg "Not owner of underlying" (underlying.owner == minter)
+        assertMsg "Wrong asset type" (underlying.instrument == config.underlyingAsset)
+
         -- Calculate assets required (round UP to favor vault)
         let assetsRequired = if state.totalShares == 0.0
               then sharesToMint
               else (sharesToMint * state.totalAssets / state.totalShares) + 0.0000000001
-        
-        -- Now do a deposit with calculated assets
-        exercise self Deposit with
+
+        assertMsg "Insufficient underlying for requested shares" (underlying.amount >= assetsRequired)
+
+        -- Split if we have more than needed
+        (depositCid, changeCid) <- if underlying.amount == assetsRequired
+          then return (underlyingHoldingCid, None)
+          else do
+            (exactCid, changeCid) <- exercise underlyingHoldingCid Split with
+              splitAmount = assetsRequired
+              reason = mintReason
+            return (exactCid, Some changeCid)
+
+        -- Deposit the exact amount
+        (newVaultCid, sharesCid, actualShares) <- exercise self Deposit with
           depositor = minter
           depositAmount = assetsRequired
           receiver = receiver
           depositReason = mintReason
+          underlyingHoldingCid = depositCid
+
+        return (newVaultCid, sharesCid, actualShares, changeCid)
 
     -- | Redeem shares for underlying assets
-    -- Burns shares and returns proportional assets
-    choice Redeem : (ContractId Vault, Decimal)
+    -- Burns shares and creates CIP-0056 underlying holding for receiver
+    choice Redeem : (ContractId Vault, ContractId UnderlyingAssetHolding, Decimal)
       with
         redeemer : Party
         sharesToRedeem : Decimal
@@ -176,7 +210,7 @@ template Vault
         
         now <- getTime
         
-        -- Handle share holding
+        -- Handle share holding - burn the redeemed shares
         if shareHolding.amount == sharesToRedeem
           then do
             -- Burn entire holding
@@ -188,8 +222,16 @@ template Vault
               reason = redeemReason
             exercise burnCid Burn with reason = redeemReason
         
-        -- NOTE: In full implementation, create underlying asset holding for receiver
-        -- using CIP-0056 pattern
+        -- Create underlying asset holding for receiver (CIP-0056 compliant)
+        _underlyingCid <- create UnderlyingAssetHolding with
+          instrument = config.underlyingAsset
+          owner = receiver
+          amount = assetsToReturn
+          holdingLock = None
+          createdAt = now
+          meta = setMetaValue txKindKey "redeem" $
+                 setMetaValue senderKey (partyToText redeemer) $
+                 setMetaValue reasonKey redeemReason []
         
         -- Update vault state
         newVaultCid <- create this with
@@ -198,10 +240,10 @@ template Vault
             totalShares = state.totalShares - sharesToRedeem
             lastFeeAccrual = now
         
-        return (newVaultCid, assetsToReturn)
+        return (newVaultCid, underlyingCid, assetsToReturn)
 
     -- | Withdraw exact assets by redeeming required shares
-    choice Withdraw : (ContractId Vault, Decimal)
+    choice Withdraw : (ContractId Vault, ContractId UnderlyingAssetHolding, Decimal)
       with
         withdrawer : Party
         assetsToWithdraw : Decimal

@@ -1,0 +1,143 @@
+-- | Underlying asset holding template
+-- Implements CIP-0056 Holding interface for underlying assets
+module Splice.Vault.UnderlyingHolding where
+
+import DA.Time
+import DA.Optional
+import Splice.Vault.Types
+
+-- | Underlying asset holding - represents ownership of underlying vault asset
+-- This template implements the CIP-0056 Holding interface
+template UnderlyingAssetHolding
+  with
+    instrument : InstrumentId
+    owner : Party
+    amount : Decimal
+    holdingLock : Optional HoldingLock
+    createdAt : Time
+    meta : Metadata
+  where
+    signatory owner
+
+    ensure amount > 0.0
+
+    -- | Get the instrument ID for this holding
+    nonconsuming choice GetInstrumentId : InstrumentId
+      controller owner
+      do return instrument
+
+    -- | Check if holding is locked
+    nonconsuming choice IsLocked : Bool
+      controller owner
+      do return $ isSome holdingLock
+
+    -- | Split holding into two (for partial transfers/deposits)
+    choice Split : (ContractId UnderlyingAssetHolding, ContractId UnderlyingAssetHolding)
+      with
+        splitAmount : Decimal
+        reason : Text
+      controller owner
+      do
+        assertMsg "Holding is locked" (isNone holdingLock)
+        assertMsg "Split amount must be positive" (splitAmount > 0.0)
+        assertMsg "Split amount must be less than total" (splitAmount < amount)
+
+        now <- getTime
+        let newMeta = setMetaValue txKindKey "merge-split" $
+                      setMetaValue reasonKey reason meta
+
+        h1 <- create this with
+          amount = splitAmount
+          createdAt = now
+          meta = newMeta
+
+        h2 <- create this with
+          amount = amount - splitAmount
+          createdAt = now
+          meta = newMeta
+
+        return (h1, h2)
+
+    -- | Merge with another holding of the same owner and instrument
+    choice Merge : ContractId UnderlyingAssetHolding
+      with
+        otherCid : ContractId UnderlyingAssetHolding
+        reason : Text
+      controller owner
+      do
+        assertMsg "Holding is locked" (isNone holdingLock)
+
+        other <- fetch otherCid
+        assertMsg "Same instrument required" (other.instrument == instrument)
+        assertMsg "Same owner required" (other.owner == owner)
+        assertMsg "Other holding is locked" (isNone other.holdingLock)
+
+        archive otherCid
+
+        now <- getTime
+        let newMeta = setMetaValue txKindKey "merge-split" $
+                      setMetaValue reasonKey reason meta
+
+        create this with
+          amount = amount + other.amount
+          createdAt = now
+          meta = newMeta
+
+    -- | Lock holding for DVP allocation
+    choice Lock : ContractId UnderlyingAssetHolding
+      with
+        lockHolder : Party
+        context : Text
+        expiresAt : Optional Time
+      controller owner, lockHolder
+      do
+        assertMsg "Already locked" (isNone holdingLock)
+
+        now <- getTime
+        let newLock = HoldingLock with
+              lockHolder = lockHolder
+              context = context
+              expiresAt = expiresAt
+        let newMeta = setMetaValue "splice.lfdecentralizedtrust.org/lock-context" context meta
+
+        create this with
+          holdingLock = Some newLock
+          createdAt = now
+          meta = newMeta
+
+    -- | Unlock holding (by owner)
+    choice Unlock : ContractId UnderlyingAssetHolding
+      with
+        reason : Text
+      controller owner
+      do
+        case holdingLock of
+          None -> abort "Not locked"
+          Some l -> do
+            now <- getTime
+            let newMeta = setMetaValue txKindKey "unlock" $
+                          setMetaValue reasonKey reason meta
+            create this with
+              holdingLock = None
+              createdAt = now
+              meta = newMeta
+
+    -- | Transfer holding to another party
+    choice Transfer : ContractId UnderlyingAssetHolding
+      with
+        newOwner : Party
+        reason : Text
+      controller owner, newOwner
+      do
+        assertMsg "Holding is locked" (isNone holdingLock)
+        assertMsg "Cannot transfer to self" (newOwner /= owner)
+
+        now <- getTime
+        let newMeta = setMetaValue txKindKey "transfer" $
+                      setMetaValue senderKey (partyToText owner) $
+                      setMetaValue reasonKey reason meta
+
+        create this with
+          owner = newOwner
+          createdAt = now
+          meta = newMeta
